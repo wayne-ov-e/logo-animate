@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Logo Pixel Animation — B</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;overflow:hidden}
+  canvas{display:block}
+  #controls{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:12px;z-index:10}
+  #controls button{background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.3);padding:8px 20px;border-radius:6px;cursor:pointer;font-size:14px}
+  #controls button:hover{background:rgba(255,255,255,.25)}
+  #label{position:fixed;top:20px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.4);font-family:monospace;font-size:13px;z-index:10}
+</style>
+</head>
+<body>
+<div id="label"></div>
+<div id="controls"><button onclick="restart()">Replay</button><button onclick="togglePause()">Pause / Resume</button></div>
+<canvas id="c"></canvas>
+<script>
+// ── Branched from logo-pixel-animation.html ──
+// Same grid, render pipeline, and control structure.
+// Different: pattern sequence, reveal direction, and timing personality.
+//
+// Pattern sequence:
+//   Sparse random →
+//   Brick offset rows →
+//   Concentric diamonds from center →
+//   Diagonal (TL→BR) →
+//   Diagonal (TR→BL) →
+//   Cross-hatch tightening →
+//   Collapse inward (logo region brightens)
+//
+// Reveal: diagonal sweep bias — pixels closest to top-left
+//   dissolve first, logo pixels lock in as the sweep passes them.
+
+const W=1080,H=1350,COLS=40,ROWS=Math.round(COLS*(H/W)),CELL=W/COLS;
+const LOGO_CELLS=[[1,0],[3,0],[5,0],[6,0],[8,0],[0,1],[2,1],[6,1],[7,1],[1,2],[4,2],[6,2],[8,2]];
+const OX=Math.floor((COLS-9)/2),OY=Math.floor((ROWS-3)/2);
+const logoSet=new Set();LOGO_CELLS.forEach(([c,r])=>logoSet.add(`${c+OX},${r+OY}`));
+const CX=COLS/2,CY=ROWS/2,MAX_DIST=Math.sqrt(CX*CX+CY*CY);
+const MAX_DIAG=COLS+ROWS-2;
+
+// Per-pixel persistent data
+const grid=new Uint8Array(COLS*ROWS);
+const timers=new Float32Array(COLS*ROWS);
+const rates=new Float32Array(COLS*ROWS);
+
+// Seeded PRNG so pattern timing irregularities are stable per session
+function lcg(seed){let s=seed;return()=>{s=(1664525*s+1013904223)&0xFFFFFFFF;return(s>>>0)/4294967296;};}
+const rng=lcg(0xF00DCAFE);
+
+// Per-pixel rate jitter seeded at init (not Math.random() each frame)
+const jitter=new Float32Array(COLS*ROWS);
+
+function init(){
+  const r2=lcg(0xDEAD1234);
+  for(let i=0;i<COLS*ROWS;i++){
+    grid[i]=0;
+    timers[i]=r2()*0.5;
+    rates[i]=0.055+r2()*0.13;
+    jitter[i]=r2(); // stable per-pixel characteristic
+  }
+}
+init();
+
+// Timing — slightly different pacing from original
+const T={RANDOM:1.0,PATTERNS:3.2,REVEAL:4.8,HOLD:6.2};
+
+// Reveal: each pixel has a diagonal unlock time (c+r gives diagonal index)
+// Logo pixels unlock last — they snap in cleanly after non-logo clears
+function revealUnlockT(c,r,isLogo){
+  const diag=(c+r)/MAX_DIAG; // 0 (top-left) → 1 (bottom-right)
+  // Add a tiny per-pixel offset so it doesn't look like a clean line
+  const noise=(jitter[r*COLS+c]-0.5)*0.08;
+  if(isLogo) return 0.85+noise*0.3; // logo pixels unlock near end of reveal
+  return diag*0.75+noise;           // non-logo: diagonal order, earlier
+}
+
+function update(t,dt){
+  const revealProgress=t<T.PATTERNS?0:Math.min(1,(t-T.PATTERNS)/(T.REVEAL-T.PATTERNS));
+
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const i=r*COLS+c;
+    const isLogo=logoSet.has(`${c},${r}`);
+
+    // ── Phase 1: Sparse random ──────────────────────────────
+    if(t<T.RANDOM){
+      timers[i]-=dt;
+      if(timers[i]<=0){
+        grid[i]=Math.random()>0.75?1:0;
+        timers[i]=rates[i]+Math.random()*0.18;
+      }
+
+    // ── Phase 2: Pattern sequence ───────────────────────────
+    } else if(t<T.PATTERNS){
+      const p=(t-T.RANDOM)/(T.PATTERNS-T.RANDOM); // 0→1
+
+      timers[i]-=dt;
+      if(timers[i]<=0){
+
+        // Manhattan distance from center — for concentric diamonds
+        const manhattan=Math.abs(c-CX)+Math.abs(r-CY);
+        const maxManhattan=CX+CY;
+
+        if(p<0.14){
+          // Brick: even rows offset by half, forming interlocked pattern
+          const brickCol=r%2===0?c%4===0:(c+2)%4===0;
+          grid[i]=brickCol?1:(Math.random()>0.95?1:0);
+
+        } else if(p<0.28){
+          // Concentric diamonds (Manhattan distance rings from center)
+          const ring=Math.round(manhattan)%7;
+          grid[i]=(ring<2)?1:(Math.random()>0.96?1:0);
+
+        } else if(p<0.42){
+          // Diagonal TL→BR — slightly tighter spacing than original
+          const diag=(c+r)%5===0;
+          grid[i]=diag?1:(Math.random()>0.96?1:0);
+
+        } else if(p<0.55){
+          // Diagonal TR→BL
+          const diag=(c-r+ROWS)%5===0;
+          grid[i]=diag?1:(Math.random()>0.96?1:0);
+
+        } else if(p<0.68){
+          // Cross-hatch — both diagonals together, spacing tightens with p
+          const spacing=Math.max(4,Math.round(8*(1-(p-0.55)/0.13)));
+          const d1=(c+r)%spacing===0;
+          const d2=(c-r+ROWS)%spacing===0;
+          grid[i]=(d1||d2)?1:(Math.random()>0.97?1:0);
+
+        } else if(p<0.82){
+          // Collapse inward — concentric diamonds shrink toward logo center
+          // Outer rings fade, inner rings stay
+          const distFromLogo=Math.abs(c-(OX+4))+Math.abs(r-(OY+1));
+          const collapseProgress=(p-0.68)/0.14;
+          const activeRadius=maxManhattan*(1-collapseProgress*0.7);
+          const ring=Math.round(manhattan)%5;
+          if(manhattan<activeRadius){
+            grid[i]=(ring<2)?1:(Math.random()>0.95?1:0);
+          } else {
+            grid[i]=Math.random()>0.97?1:0;
+          }
+
+        } else {
+          // Logo region pulses, rest fades
+          const distFromLogo=Math.abs(c-(OX+4))+Math.abs(r-(OY+1));
+          if(isLogo){
+            grid[i]=Math.random()>0.2?1:0;
+          } else {
+            const keep=Math.max(0,1-(distFromLogo/12));
+            grid[i]=Math.random()<keep*0.1?1:0;
+          }
+        }
+
+        timers[i]=0.055+Math.random()*0.11;
+      }
+
+    // ── Phase 3: Diagonal reveal ────────────────────────────
+    } else if(t<T.REVEAL){
+      const unlock=revealUnlockT(c,r,isLogo);
+      const localP=Math.max(0,(revealProgress-unlock*0.85)/(1-unlock*0.85));
+      const eased=localP*localP*(3-2*localP);
+
+      timers[i]-=dt;
+      if(timers[i]<=0){
+        if(isLogo){
+          // Logo pixels: snap to solid once unlocked, flicker briefly beforehand
+          if(revealProgress>unlock){
+            grid[i]=Math.random()<(0.7+eased*0.3)?1:0;
+          } else {
+            // Still in the pattern phase for logo — hold last pattern state mostly
+            grid[i]=Math.random()>0.35?grid[i]:0;
+          }
+        } else {
+          // Non-logo: dissolve away as diagonal sweep passes
+          const dissolveDensity=Math.max(0,(1-eased)*0.08);
+          grid[i]=Math.random()<dissolveDensity?1:0;
+        }
+        timers[i]=0.04+Math.random()*0.09;
+      }
+
+    // ── Phase 4: Hold ───────────────────────────────────────
+    } else {
+      grid[i]=isLogo?1:0;
+    }
+  }
+}
+
+// ── Shared render pipeline (identical to original) ──────────
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+const label=document.getElementById('label');
+function resize(){const s=Math.min(innerWidth/W,innerHeight/H,1);canvas.width=W;canvas.height=H;canvas.style.width=(W*s)+'px';canvas.style.height=(H*s)+'px';}
+resize();addEventListener('resize',resize);
+const imgData=ctx.createImageData(W,H),px=imgData.data;
+function render(){
+  px.fill(0);
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const x0=Math.round(c*CELL),y0=Math.round(r*CELL),x1=Math.round((c+1)*CELL),y1=Math.round((r+1)*CELL);
+    if(grid[r*COLS+c]){for(let py=y0;py<y1&&py<H;py++)for(let px2=x0;px2<x1&&px2<W;px2++){const o=(py*W+px2)*4;px[o]=255;px[o+1]=255;px[o+2]=255;px[o+3]=255;}}
+    else{for(let py=y0;py<y1&&py<H;py++)for(let px2=x0;px2<x1&&px2<W;px2++){const o=(py*W+px2)*4;px[o+3]=255;}}
+  }
+  ctx.putImageData(imgData,0,0);
+}
+let startTime=null,paused=false,pauseTime=0;
+function draw(ts){
+  if(!startTime)startTime=ts;if(paused){requestAnimationFrame(draw);return;}
+  const elapsed=(ts-startTime-pauseTime)/1000;
+  label.textContent=elapsed<T.RANDOM?'Random':elapsed<T.PATTERNS?'Patterns':elapsed<T.REVEAL?'Reveal':'Hold';
+  update(elapsed,1/60);render();requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+function restart(){init();startTime=null;pauseTime=0;paused=false;}
+let ps=0;function togglePause(){if(paused){pauseTime+=performance.now()-ps;paused=false;}else{ps=performance.now();paused=true;}}
+</script>
+</body>
+</html>
